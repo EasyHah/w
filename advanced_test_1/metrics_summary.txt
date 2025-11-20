@@ -1,0 +1,9 @@
+mean_precision: 0.42928853126272504
+mean_recall: 0.338178094467404
+mean_dice: 0.36652821990957785
+mean_iou: 0.26973032685815085
+num_images: 3
+confusion_matrix: [[1192984, 8178], [18475, 9163]]
+best_threshold: 0.05
+best_threshold_dice: 0.4090955944502012
+roc_auc: 0.7120306032212491

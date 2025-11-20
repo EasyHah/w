@@ -1,0 +1,29 @@
+Image: tile_00002_jpg.rf.87f63538c0193de6180cd2c08e61086e.jpg
+Classes (True rows vs Pred cols):
+Class_0,Class_1,Class_2
+
+Counts Matrix:
+340611,24367,3090
+1245,32185,0
+727,0,7375
+
+Row Normalized Matrix (Recall per true class):
+0.925402,0.066202,0.008395
+0.037242,0.962758,0.000000
+0.089731,0.000000,0.910269
+
+Column Normalized Matrix (Precision per predicted class):
+0.994244,0.430878,0.295270
+0.003634,0.569122,0.000000
+0.002122,0.000000,0.704730
+
+F1 Score Matrix:
+0.958589,0.114771,0.016326
+0.006622,0.715365,0.000000
+0.004146,0.000000,0.794420
+
+Legend:
+  Counts = 像素数
+  Row Normalized = 在该真实类(行)内的占比 (Recall)
+  Column Normalized = 在该预测类(列)内的占比 (Precision)
+  F1 Score = 2*Precision*Recall/(Precision+Recall)

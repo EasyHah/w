@@ -1,0 +1,8 @@
+              precision    recall  f1-score   support
+
+  Background     0.9847    0.9932    0.9890   1201162
+  Foreground     0.5284    0.3315    0.4074     27638
+
+    accuracy                         0.9783   1228800
+   macro avg     0.7566    0.6624    0.6982   1228800
+weighted avg     0.9745    0.9783    0.9759   1228800
