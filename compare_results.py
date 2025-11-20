@@ -27,6 +27,7 @@ def group_directories(dirs):
 def load_metrics(group_dirs):
     summary_data = []
     per_image_data = pd.DataFrame()
+    per_image_confusion = []
 
     for d in group_dirs:
         # Load metrics_summary.json
@@ -51,9 +52,44 @@ def load_metrics(group_dirs):
             except Exception as e:
                 print(f"Error reading {csv_path}: {e}")
 
-    return summary_data, per_image_data
+        # Load per_image_confusion
+        confusion_dir = os.path.join(d, 'per_image_confusion')
+        if os.path.exists(confusion_dir):
+            txt_files = glob.glob(os.path.join(confusion_dir, '*_confusion.txt'))
+            for txt_file in txt_files:
+                try:
+                    with open(txt_file, 'r') as f:
+                        content = f.read()
+                        # Extract Image name
+                        img_match = re.search(r'Image: (.+)', content)
+                        img_name = img_match.group(1) if img_match else os.path.basename(txt_file).replace('_confusion.txt', '')
 
-def visualize_group(prefix, summary_data, per_image_data):
+                        # Extract Counts Matrix
+                        # Expecting:
+                        # Counts Matrix:
+                        # 379730,3281
+                        # 14286,12303
+                        matrix_match = re.search(r'Counts Matrix:\n([\d,]+)\n([\d,]+)', content)
+                        if matrix_match:
+                            row1 = [int(x) for x in matrix_match.group(1).split(',')]
+                            row2 = [int(x) for x in matrix_match.group(2).split(',')]
+                            tn, fp = row1[0], row1[1]
+                            fn, tp = row2[0], row2[1]
+
+                            per_image_confusion.append({
+                                'folder': d,
+                                'image': img_name,
+                                'TN': tn,
+                                'FP': fp,
+                                'FN': fn,
+                                'TP': tp
+                            })
+                except Exception as e:
+                    print(f"Error reading confusion file {txt_file}: {e}")
+
+    return summary_data, per_image_data, pd.DataFrame(per_image_confusion)
+
+def visualize_group(prefix, summary_data, per_image_data, confusion_data):
     output_dir = f'comparison_results_{prefix}'
     os.makedirs(output_dir, exist_ok=True)
 
@@ -125,6 +161,43 @@ def visualize_group(prefix, summary_data, per_image_data):
             plt.savefig(os.path.join(output_dir, 'precision_vs_recall_scatter.png'))
             plt.close()
 
+    # 5. Per-Image Confusion Matrix Comparison
+    if not confusion_data.empty:
+        confusion_out_dir = os.path.join(output_dir, 'per_image_confusion_comparison')
+        os.makedirs(confusion_out_dir, exist_ok=True)
+
+        # Get list of unique images
+        unique_images = confusion_data['image'].unique()
+
+        for img in unique_images:
+            img_data = confusion_data[confusion_data['image'] == img]
+
+            # Prepare data for plotting: Stacked bar or Grouped bar?
+            # Grouped bar is better to compare TP/FP/FN/TN across folders
+
+            # Melt the data
+            img_melted = img_data.melt(id_vars=['folder', 'image'], value_vars=['TP', 'TN', 'FP', 'FN'], var_name='Confusion', value_name='Count')
+
+            plt.figure(figsize=(10, 6))
+            sns.barplot(data=img_melted, x='Confusion', y='Count', hue='folder')
+
+            # Use log scale if counts vary wildly (often TN >> others)
+            # Check range
+            if img_melted['Count'].max() > 10 * img_melted['Count'].replace(0, np.nan).min():
+                plt.yscale('log')
+                plt.ylabel('Count (Log Scale)')
+            else:
+                plt.ylabel('Count')
+
+            plt.title(f'Confusion Matrix Components for {img}')
+            plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+            plt.tight_layout()
+
+            # Sanitize filename
+            safe_img_name = re.sub(r'[^\w\-_\.]', '_', img)
+            plt.savefig(os.path.join(confusion_out_dir, f'{safe_img_name}_confusion_comparison.png'))
+            plt.close()
+
 def main():
     dirs = get_directories()
     groups = group_directories(dirs)
@@ -143,10 +216,10 @@ def main():
             print(f"Sorting failed, falling back to default sort: {e}")
             group_dirs.sort()
 
-        summary_data, per_image_data = load_metrics(group_dirs)
+        summary_data, per_image_data, confusion_data = load_metrics(group_dirs)
 
-        if summary_data or not per_image_data.empty:
-            visualize_group(prefix, summary_data, per_image_data)
+        if summary_data or not per_image_data.empty or not confusion_data.empty:
+            visualize_group(prefix, summary_data, per_image_data, confusion_data)
         else:
             print(f"No data found for group {prefix}")
 
