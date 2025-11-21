@@ -22,12 +22,19 @@ def group_directories(dirs):
             if prefix not in groups:
                 groups[prefix] = []
             groups[prefix].append(d)
+
+    # Explicitly add test_mc_0 to advanced_test group if both exist
+    if 'advanced_test' in groups and 'test_mc_0' in dirs:
+        # Check if it's already there (unlikely given the regex, but good for safety)
+        if 'test_mc_0' not in groups['advanced_test']:
+            groups['advanced_test'].append('test_mc_0')
+
     return groups
 
 def load_metrics(group_dirs):
     summary_data = []
     per_image_data = pd.DataFrame()
-    per_image_confusion = []
+    per_class_data_list = []
 
     for d in group_dirs:
         # Load metrics_summary.json
@@ -64,138 +71,149 @@ def load_metrics(group_dirs):
                         img_match = re.search(r'Image: (.+)', content)
                         img_name = img_match.group(1) if img_match else os.path.basename(txt_file).replace('_confusion.txt', '')
 
+                        # Extract Classes
+                        classes_match = re.search(r'Classes \(True rows vs Pred cols\):\n(.+)', content)
+                        if classes_match:
+                            # Split by comma and strip whitespace
+                            classes = [c.strip() for c in classes_match.group(1).split(',')]
+                        else:
+                            # Default fallback for older files
+                            classes = ['Background', 'Foreground']
+
                         # Extract Counts Matrix
                         # Expecting:
                         # Counts Matrix:
                         # 379730,3281
                         # 14286,12303
-                        matrix_match = re.search(r'Counts Matrix:\n([\d,]+)\n([\d,]+)', content)
+                        # It captures multiple lines of numbers
+                        matrix_match = re.search(r'Counts Matrix:\n((?:[\d,]+\n?)+)', content)
                         if matrix_match:
-                            row1 = [int(x) for x in matrix_match.group(1).split(',')]
-                            row2 = [int(x) for x in matrix_match.group(2).split(',')]
-                            tn, fp = row1[0], row1[1]
-                            fn, tp = row2[0], row2[1]
+                            matrix_str = matrix_match.group(1).strip()
+                            matrix_rows = matrix_str.split('\n')
+                            matrix = []
+                            for row in matrix_rows:
+                                # Remove empty strings if any from split
+                                if row.strip():
+                                    matrix.append([int(x) for x in row.split(',')])
 
-                            per_image_confusion.append({
-                                'folder': d,
-                                'image': img_name,
-                                'TN': tn,
-                                'FP': fp,
-                                'FN': fn,
-                                'TP': tp
-                            })
+                            matrix = np.array(matrix)
+                            total_sum = np.sum(matrix)
+
+                            # Calculate per-class metrics
+                            for i, class_name in enumerate(classes):
+                                if i >= matrix.shape[0]:
+                                    break
+
+                                tp = matrix[i, i]
+                                fp = np.sum(matrix[:, i]) - tp
+                                fn = np.sum(matrix[i, :]) - tp
+                                tn = total_sum - (tp + fp + fn)
+
+                                precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+                                recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+                                f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+                                iou = tp / (tp + fp + fn) if (tp + fp + fn) > 0 else 0
+
+                                per_class_data_list.append({
+                                    'folder': d,
+                                    'image': img_name,
+                                    'class': class_name,
+                                    'precision': precision,
+                                    'recall': recall,
+                                    'f1': f1,
+                                    'iou': iou,
+                                    'TP': tp,
+                                    'FP': fp,
+                                    'FN': fn,
+                                    'TN': tn
+                                })
+
                 except Exception as e:
                     print(f"Error reading confusion file {txt_file}: {e}")
 
-    return summary_data, per_image_data, pd.DataFrame(per_image_confusion)
+    return summary_data, per_image_data, pd.DataFrame(per_class_data_list)
 
-def visualize_group(prefix, summary_data, per_image_data, confusion_data):
+def visualize_group(prefix, summary_data, per_image_data, per_class_data):
     output_dir = f'comparison_results_{prefix}'
     os.makedirs(output_dir, exist_ok=True)
 
     print(f"Generating visualizations for {prefix} in {output_dir}...")
 
-    # 1. Bar chart for aggregate metrics
+    # 1. Bar chart for aggregate metrics (Overall)
     if summary_data:
         df_summary = pd.DataFrame(summary_data)
         metrics_to_plot = ['mean_precision', 'mean_recall', 'mean_dice', 'mean_iou', 'roc_auc']
-        # Filter columns that actually exist
         metrics_to_plot = [m for m in metrics_to_plot if m in df_summary.columns]
 
         if metrics_to_plot:
-            # Melt for plotting
             df_melted = df_summary.melt(id_vars='folder', value_vars=metrics_to_plot, var_name='Metric', value_name='Value')
 
             plt.figure(figsize=(12, 6))
             sns.barplot(data=df_melted, x='Metric', y='Value', hue='folder')
-            plt.title(f'Aggregate Metrics Comparison for {prefix}')
+            plt.title(f'Overall Aggregate Metrics Comparison for {prefix}')
             plt.xticks(rotation=45)
             plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
             plt.tight_layout()
             plt.savefig(os.path.join(output_dir, 'aggregate_metrics_comparison.png'))
             plt.close()
 
-        # 4. Heatmap of summary metrics
-        if metrics_to_plot:
+            # Heatmap of summary metrics
             df_heatmap = df_summary.set_index('folder')[metrics_to_plot]
-            # Normalize or just show values? Just show values for now.
             plt.figure(figsize=(10, len(df_summary) * 0.8 + 2))
             sns.heatmap(df_heatmap, annot=True, cmap='viridis', fmt='.3f')
-            plt.title(f'Metrics Heatmap for {prefix}')
+            plt.title(f'Overall Metrics Heatmap for {prefix}')
             plt.tight_layout()
             plt.savefig(os.path.join(output_dir, 'metrics_heatmap.png'))
             plt.close()
 
-    # 2. Box plots and Violin plots for per-image metrics distributions
+    # 2. Per-Class Metrics Comparison
+    if not per_class_data.empty:
+        per_class_dir = os.path.join(output_dir, 'per_class_comparison')
+        os.makedirs(per_class_dir, exist_ok=True)
+
+        classes = per_class_data['class'].unique()
+
+        for cls in classes:
+            # Sanitize class name for filename
+            safe_cls_name = re.sub(r'[^\w\-_\.]', '_', cls)
+
+            cls_data = per_class_data[per_class_data['class'] == cls]
+
+            metrics = ['iou', 'f1', 'precision', 'recall']
+
+            # Boxplot of distributions
+            cls_melted = cls_data.melt(id_vars=['folder', 'image'], value_vars=metrics, var_name='Metric', value_name='Value')
+
+            plt.figure(figsize=(12, 6))
+            sns.boxplot(data=cls_melted, x='Metric', y='Value', hue='folder')
+            plt.title(f'Class: {cls} - Metrics Distribution Comparison')
+            plt.ylim(0, 1.1)
+            plt.tight_layout()
+            plt.savefig(os.path.join(per_class_dir, f'class_{safe_cls_name}_metrics_boxplot.png'))
+            plt.close()
+
+            # Barplot of Mean values
+            cls_means = cls_data.groupby('folder')[metrics].mean().reset_index()
+            cls_means_melted = cls_means.melt(id_vars='folder', value_vars=metrics, var_name='Metric', value_name='Mean Value')
+
+            plt.figure(figsize=(12, 6))
+            sns.barplot(data=cls_means_melted, x='Metric', y='Mean Value', hue='folder')
+            plt.title(f'Class: {cls} - Mean Metrics Comparison')
+            plt.ylim(0, 1.1)
+            plt.tight_layout()
+            plt.savefig(os.path.join(per_class_dir, f'class_{safe_cls_name}_mean_metrics.png'))
+            plt.close()
+
+    # 3. Per-Image Scatter plots (Global)
     if not per_image_data.empty:
-        metrics_to_dist = ['dice', 'iou', 'precision', 'recall']
-        metrics_to_dist = [m for m in metrics_to_dist if m in per_image_data.columns]
-
-        for metric in metrics_to_dist:
-            # Box plot
-            plt.figure(figsize=(10, 6))
-            sns.boxplot(data=per_image_data, x='folder', y=metric)
-            plt.title(f'{metric} Distribution Comparison for {prefix}')
-            plt.xticks(rotation=45)
-            plt.tight_layout()
-            plt.savefig(os.path.join(output_dir, f'{metric}_distribution_boxplot.png'))
-            plt.close()
-
-            # Violin plot
-            plt.figure(figsize=(10, 6))
-            sns.violinplot(data=per_image_data, x='folder', y=metric)
-            plt.title(f'{metric} Distribution Comparison for {prefix}')
-            plt.xticks(rotation=45)
-            plt.tight_layout()
-            plt.savefig(os.path.join(output_dir, f'{metric}_distribution_violinplot.png'))
-            plt.close()
-
-        # 3. Scatter plot Precision vs Recall
         if 'precision' in per_image_data.columns and 'recall' in per_image_data.columns:
             plt.figure(figsize=(10, 6))
             sns.scatterplot(data=per_image_data, x='recall', y='precision', hue='folder', style='folder', alpha=0.7)
-            plt.title(f'Precision vs Recall per Image for {prefix}')
+            plt.title(f'Global Precision vs Recall per Image for {prefix}')
             plt.grid(True)
             plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
             plt.tight_layout()
-            plt.savefig(os.path.join(output_dir, 'precision_vs_recall_scatter.png'))
-            plt.close()
-
-    # 5. Per-Image Confusion Matrix Comparison
-    if not confusion_data.empty:
-        confusion_out_dir = os.path.join(output_dir, 'per_image_confusion_comparison')
-        os.makedirs(confusion_out_dir, exist_ok=True)
-
-        # Get list of unique images
-        unique_images = confusion_data['image'].unique()
-
-        for img in unique_images:
-            img_data = confusion_data[confusion_data['image'] == img]
-
-            # Prepare data for plotting: Stacked bar or Grouped bar?
-            # Grouped bar is better to compare TP/FP/FN/TN across folders
-
-            # Melt the data
-            img_melted = img_data.melt(id_vars=['folder', 'image'], value_vars=['TP', 'TN', 'FP', 'FN'], var_name='Confusion', value_name='Count')
-
-            plt.figure(figsize=(10, 6))
-            sns.barplot(data=img_melted, x='Confusion', y='Count', hue='folder')
-
-            # Use log scale if counts vary wildly (often TN >> others)
-            # Check range
-            if img_melted['Count'].max() > 10 * img_melted['Count'].replace(0, np.nan).min():
-                plt.yscale('log')
-                plt.ylabel('Count (Log Scale)')
-            else:
-                plt.ylabel('Count')
-
-            plt.title(f'Confusion Matrix Components for {img}')
-            plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-            plt.tight_layout()
-
-            # Sanitize filename
-            safe_img_name = re.sub(r'[^\w\-_\.]', '_', img)
-            plt.savefig(os.path.join(confusion_out_dir, f'{safe_img_name}_confusion_comparison.png'))
+            plt.savefig(os.path.join(output_dir, 'global_precision_vs_recall_scatter.png'))
             plt.close()
 
 def main():
@@ -203,23 +221,18 @@ def main():
     groups = group_directories(dirs)
 
     for prefix, group_dirs in groups.items():
-        # Only compare if there's more than 1 folder, or if user explicitly wants visualization for single groups too.
-        # User said "compare contents in folders", implying plural.
-        # But even with 1 folder, visualization is useful. I'll process all groups.
-
         print(f"Processing group: {prefix} with folders: {group_dirs}")
         # Sort group_dirs naturally
         try:
-            # Natural sort
             group_dirs.sort(key=lambda text: [int(c) if c.isdigit() else c for c in re.split(r'(\d+)', text)])
         except Exception as e:
             print(f"Sorting failed, falling back to default sort: {e}")
             group_dirs.sort()
 
-        summary_data, per_image_data, confusion_data = load_metrics(group_dirs)
+        summary_data, per_image_data, per_class_data = load_metrics(group_dirs)
 
-        if summary_data or not per_image_data.empty or not confusion_data.empty:
-            visualize_group(prefix, summary_data, per_image_data, confusion_data)
+        if summary_data or not per_image_data.empty or not per_class_data.empty:
+            visualize_group(prefix, summary_data, per_image_data, per_class_data)
         else:
             print(f"No data found for group {prefix}")
 
